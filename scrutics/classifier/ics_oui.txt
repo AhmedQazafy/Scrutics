@@ -1,0 +1,36 @@
+# Scrutics bundled ICS/OT vendor OUI database
+# Format matches IEEE oui.txt so the same parser handles both
+# Sources: IEEE public registry, vendor documentation
+# Last updated: 2025
+# To replace with full IEEE database, run: python scripts/download_oui.py
+
+00-80-F4   (hex)				Schneider Electric
+00-1B-1B   (hex)				Siemens AG
+00-00-BC   (hex)				Rockwell Automation
+00-60-35   (hex)				Contemporary Controls (BACnet)
+00-0E-8C   (hex)				Moxa Technologies Co., Ltd.
+00-01-C6   (hex)				Moxa Technologies Co., Ltd.
+00-90-27   (hex)				Beckhoff Automation GmbH
+00-50-C2   (hex)				Phoenix Contact
+00-30-11   (hex)				Advantech Co., Ltd.
+00-30-DE   (hex)				Wago Kontakttechnik GmbH
+00-02-A5   (hex)				Hilscher GmbH
+00-20-4E   (hex)				Red Lion Controls
+00-0D-F1   (hex)				GE Automation & Controls
+00-90-E8   (hex)				GE Fanuc Automation
+00-00-7A   (hex)				Honeywell Inc.
+00-50-4A   (hex)				ABB Automation
+00-30-A9   (hex)				Emerson Network Power
+00-50-4B   (hex)				Yokogawa Electric Corporation
+00-0C-F1   (hex)				Mitsubishi Electric Corporation
+00-00-4C   (hex)				Omron Corporation
+00-40-AE   (hex)				Delta Electronics Inc.
+00-D0-60   (hex)				Eaton Corporation
+00-D0-C9   (hex)				Pilz GmbH & Co. KG
+00-06-77   (hex)				Sick AG
+00-0A-14   (hex)				Turck Inc.
+00-04-A3   (hex)				Lantronix (serial device servers)
+00-40-D0   (hex)				Digi International
+00-30-48   (hex)				Supermicro (common in OT servers)
+00-50-56   (hex)				VMware (virtual environments)
+00-0C-29   (hex)				VMware (virtual machines)

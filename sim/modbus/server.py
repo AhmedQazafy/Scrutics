@@ -1,6 +1,7 @@
 """
 Minimal Modbus TCP server for OT simulation.
 Listens on port 502 and responds to standard Modbus requests.
+Compatible with pymodbus 3.x (keyword-argument API).
 """
 import logging
 from pymodbus.server import StartTcpServer
