@@ -61,6 +61,22 @@ services:
         ipv4_address: 192.168.100.13
     restart: unless-stopped
 
+  #Traffic Generator between the Devices
+  traffic-gen:
+    build: ./sim/traffic_gen
+    container_name: scrutics-traffic-gen
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    networks:
+      - ot-sim
+    depends_on:
+      - modbus-device-1
+      - modbus-device-2
+      - enip-device-1
+      - bacnet-device-1
+    restart: always
+    
   # Scrutics — attaches to ot-sim bridge, sees all L2 traffic in promiscuous mode
   # NET_RAW + NET_ADMIN caps required for Scapy
   scrutics:
@@ -78,4 +94,4 @@ services:
       - modbus-device-2
       - enip-device-1
       - bacnet-device-1
-    restart: unless-stopped
+    restart: "no"
