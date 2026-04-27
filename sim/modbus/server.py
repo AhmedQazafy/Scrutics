@@ -21,4 +21,4 @@ store = ModbusSlaveContext(
 context = ModbusServerContext(slaves=store, single=True)
 
 print("[*] Modbus TCP server listening on 0.0.0.0:502")
-StartTcpServer(context, address=("0.0.0.0", 502))
+StartTcpServer(context=context, address=("0.0.0.0", 502))
