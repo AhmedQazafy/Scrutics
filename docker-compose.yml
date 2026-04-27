@@ -1,0 +1,81 @@
+version: "3.9"
+
+# OT Simulation Network for Scrutics development and testing.
+#
+# Device MAC addresses use real OUI prefixes for known ICS vendors
+# so Scrutics OUI lookup produces realistic results.
+#
+# Phase 1 (current): OUI fingerprinting + port-based classification
+# Phase 2 (future):  Protocol banner fingerprinting, real CIP/BACnet traffic
+#
+# Known limitations flagged inline:
+#   - EtherNet/IP: TCP stub only, no CIP implementation
+#   - BACnet: UDP stub only, no BBMD/broadcast (needs bacpypes3 + BBMD for real traffic)
+
+networks:
+  ot-sim:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.100.0/24
+
+services:
+
+  # Modbus Device 1 — Schneider Electric OUI
+  modbus-device-1:
+    build: ./sim/modbus
+    mac_address: "00:80:F4:AA:BB:01"
+    networks:
+      ot-sim:
+        ipv4_address: 192.168.100.10
+    restart: unless-stopped
+
+  # Modbus Device 2 — Siemens OUI
+  modbus-device-2:
+    build: ./sim/modbus
+    mac_address: "00:1B:1B:AA:BB:02"
+    networks:
+      ot-sim:
+        ipv4_address: 192.168.100.11
+    restart: unless-stopped
+
+  # EtherNet/IP Device — Rockwell Automation OUI
+  # Phase 1 stub: TCP listener on 44818 only, no CIP
+  # TODO Phase 2: replace with full CIP server (cpppo or similar)
+  enip-device-1:
+    build: ./sim/enip
+    mac_address: "00:00:BC:AA:BB:03"
+    networks:
+      ot-sim:
+        ipv4_address: 192.168.100.12
+    restart: unless-stopped
+
+  # BACnet Device — Contemporary Controls OUI
+  # Phase 1 stub: UDP listener on 47808 only
+  # TODO Phase 2: replace with bacpypes3 + BBMD for real BACnet/IP broadcast
+  bacnet-device-1:
+    build: ./sim/bacnet
+    mac_address: "00:60:35:AA:BB:04"
+    networks:
+      ot-sim:
+        ipv4_address: 192.168.100.13
+    restart: unless-stopped
+
+  # Scrutics — attaches to ot-sim bridge, sees all L2 traffic in promiscuous mode
+  # NET_RAW + NET_ADMIN caps required for Scapy
+  scrutics:
+    build: .
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    networks:
+      - ot-sim
+    command: python -m scrutics -i eth0 -t 120 -o /output/results.csv
+    volumes:
+      - ./output:/output
+    depends_on:
+      - modbus-device-1
+      - modbus-device-2
+      - enip-device-1
+      - bacnet-device-1
+    restart: unless-stopped
