@@ -45,14 +45,16 @@ class Asset:
 
 class AssetInventory:
     def __init__(self):
-        self._assets: dict[str, Asset] = {}  # keyed by IP
+        self._assets: dict[str, Asset] = {}
 
-    def update(self, ip: str, mac: str, dst_ip: str = None, dst_port: int = None):
+    def update(self, ip: str, mac: str = None, dst_ip: str = None, dst_port: int = None):
         """Update or create an asset record from a single observed packet."""
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         if ip not in self._assets:
-            self._assets[ip] = Asset(ip=ip, mac=mac, first_seen=now)
+            self._assets[ip] = Asset(ip=ip, mac=mac or "Unknown", first_seen=now)
+        elif mac:
+            self._assets[ip].mac = mac
 
         asset = self._assets[ip]
         asset.last_seen = now
@@ -65,6 +67,17 @@ class AssetInventory:
         if dst_port:
             asset.ports_seen.add(dst_port)
 
+    def credit_listener_port(self, ip: str, port: int):
+        """
+        Credit a device with a port it was observed listening on.
+        Called when traffic-gen or any client connects TO this ip:port.
+        The destination device is listening — we mark it as such.
+        """
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if ip not in self._assets:
+            self._assets[ip] = Asset(ip=ip, mac="Unknown", first_seen=now)
+        self._assets[ip].ports_seen.add(port)
+
     def get_all(self) -> list[Asset]:
         return list(self._assets.values())
 
@@ -75,16 +88,11 @@ class AssetInventory:
         return len(self._assets)
 
     def export_csv(self, path: str):
-        """Export asset inventory to CSV."""
         assets = self.get_all()
         if not assets:
-            print("[!] No assets to export.")
             return
-
         with open(path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=assets[0].to_dict().keys())
             writer.writeheader()
             for asset in assets:
                 writer.writerow(asset.to_dict())
-
-        print(f"[+] Exported {len(assets)} assets to {path}")
