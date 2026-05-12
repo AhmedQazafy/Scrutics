@@ -111,5 +111,5 @@ class TestAssetInventory:
         inv = AssetInventory()
         inv.update(ip="10.0.0.1", mac="AA:BB:CC:DD:EE:FF")
         d = inv.get("10.0.0.1").to_dict()
-        for key in ["ip", "mac", "vendor", "role", "confidence", "packet_count"]:
+        for key in ["ip", "mac", "vendor", "role", "confidence_pct", "packet_count"]:
             assert key in d

@@ -1,8 +1,5 @@
 scapy>=2.5.0
-rich>=13.0.0
+textual>=0.80.0
 pyyaml>=6.0
 pytest>=7.4.0
 pytest-cov>=4.1.0
-
-# Optional: only needed if running scripts/download_oui.py
-# requests>=2.31.0
