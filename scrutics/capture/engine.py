@@ -21,6 +21,8 @@ class CaptureEngine:
         self.baseline = BaselineEngine(observation_window=baseline_window)
         self.event_log: deque = deque(maxlen=500)
         self._event_buffer: list = []
+        self._logged_protocols: dict = {}   # ip -> frozenset of protocols last logged
+        self._logged_dst_ports: dict = {}   # ip -> set of dst ports already logged
 
     def _log(self, message: str, style: str = "dim white"):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
@@ -64,6 +66,9 @@ class CaptureEngine:
                                 proto=proto, ts=now_ts)
 
     def _process_flow_data(self, src_ip, src_mac, dst_ip, dst_port, proto, ts, alert=None):
+        if not src_ip:
+            return
+
         from scrutics.classifier.oui import lookup_vendor, is_ot_vendor
         from scrutics.classifier.protocol import classify_by_ports
 
@@ -76,7 +81,10 @@ class CaptureEngine:
                 self._classify_and_score(dst_asset)
                 from scrutics.classifier.protocol import ICS_PORTS
                 if dst_port in ICS_PORTS:
-                    self._log(f"{dst_ip} <- port {dst_port} ({proto or '?'}) from {src_ip}", "cyan")
+                    seen = self._logged_dst_ports.setdefault(dst_ip, set())
+                    if dst_port not in seen:
+                        seen.add(dst_port)
+                        self._log(f"{dst_ip} <- port {dst_port} ({proto or '?'}) from {src_ip}", "cyan")
 
         asset = self.inventory.get(src_ip)
         if asset:
@@ -134,7 +142,10 @@ class CaptureEngine:
         )
         self._recompute_confidence(asset)
         if result["is_ot"] is True and result.get("matched_rule"):
-            self._log(f"{asset.ip} -> {', '.join(asset.protocols)} ({result['matched_rule']})", "green")
+            current = frozenset(asset.protocols)
+            if self._logged_protocols.get(asset.ip) != current:
+                self._logged_protocols[asset.ip] = current
+                self._log(f"{asset.ip} -> {', '.join(asset.protocols)} ({result['matched_rule']})", "green")
 
     def _recompute_confidence(self, asset):
         asset.confidence_pct = confidence_pct(
