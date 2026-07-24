@@ -4,6 +4,42 @@ from dataclasses import dataclass, field
 from typing import Optional
 import csv
 import datetime
+import ipaddress
+
+
+def is_inventory_ip(
+    ip: str | None,
+    *,
+    include_public_ips: bool = False,
+    cidrs: list[ipaddress.IPv4Network] | None = None,
+) -> bool:
+    """
+    Return True for device IPs that should appear in inventory.
+
+    Broadcast, multicast, unspecified, and subnet-broadcast-looking .255
+    addresses are traffic targets, not assets.
+    """
+    if not ip:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if addr.version != 4:
+        return False
+    if addr.is_unspecified or addr.is_multicast:
+        return False
+    if addr.is_loopback or addr.is_reserved:
+        return False
+    if ip == "255.255.255.255":
+        return False
+    if ip.rsplit(".", 1)[-1] == "255":
+        return False
+    if cidrs:
+        return any(addr in network for network in cidrs)
+    if not include_public_ips and not (addr.is_private or addr.is_link_local):
+        return False
+    return True
 
 
 @dataclass
@@ -14,6 +50,7 @@ class Asset:
     is_ot_vendor: bool = False
     protocols: list = field(default_factory=list)
     ports_seen: set = field(default_factory=set)
+    contacted_ports: set = field(default_factory=set)
     role: str = "Unclassified"
     is_ot: Optional[bool] = None
     confidence: str = "LOW"
@@ -28,6 +65,9 @@ class Asset:
     initiates: bool = False
     first_seen: str = ""
     last_seen: str = ""
+    behavioral_constraints: dict = field(default_factory=dict)
+    peer_first_seen: dict = field(default_factory=dict)   # peer_ip -> epoch float
+    _constraint_anomaly_ts: dict = field(default_factory=dict)  # type -> epoch float
 
     def to_dict(self) -> dict:
         proto_str = ", ".join(self.protocols) if self.protocols else "Unknown"
@@ -43,6 +83,7 @@ class Asset:
             "baseline_status": self.baseline_status, "packet_count": self.packet_count,
             "peer_count": len(self.peer_ips),
             "ports_seen": "|".join(str(p) for p in sorted(self.ports_seen)),
+            "contacted_ports": "|".join(str(p) for p in sorted(self.contacted_ports)),
             "initiates": self.initiates, "is_ot_vendor": self.is_ot_vendor,
             "first_seen": self.first_seen, "last_seen": self.last_seen,
         }
@@ -50,10 +91,29 @@ class Asset:
 
 
 class AssetInventory:
-    def __init__(self):
+    def __init__(self, inventory_config: dict | None = None):
         self._assets: dict = {}
+        if inventory_config is None:
+            try:
+                from scrutics.config.loader import load_inventory_config
+                inventory_config = load_inventory_config()
+            except Exception:
+                inventory_config = {}
+        self._include_public_ips = bool(inventory_config.get("include_public_ips", False))
+        self._cidrs = []
+        for cidr in inventory_config.get("cidrs", []) or []:
+            self._cidrs.append(ipaddress.ip_network(str(cidr), strict=False))
+
+    def is_asset_ip(self, ip: str | None) -> bool:
+        return is_inventory_ip(
+            ip,
+            include_public_ips=self._include_public_ips,
+            cidrs=self._cidrs,
+        )
 
     def update(self, ip: str, mac: str = None, dst_ip: str = None, dst_port: int = None):
+        if not self.is_asset_ip(ip):
+            return
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if ip not in self._assets:
             self._assets[ip] = Asset(ip=ip, mac=mac or "Unknown", first_seen=now)
@@ -62,13 +122,15 @@ class AssetInventory:
         asset = self._assets[ip]
         asset.last_seen = now
         asset.packet_count += 1
-        if dst_ip and dst_ip not in ("255.255.255.255", "0.0.0.0"):
+        if self.is_asset_ip(dst_ip):
             asset.peer_ips.add(dst_ip)
             asset.initiates = True
         if dst_port:
-            asset.ports_seen.add(dst_port)
+            asset.contacted_ports.add(dst_port)
 
     def credit_listener_port(self, ip: str, port: int):
+        if not self.is_asset_ip(ip) or not port:
+            return
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if ip not in self._assets:
             self._assets[ip] = Asset(ip=ip, mac="Unknown", first_seen=now)

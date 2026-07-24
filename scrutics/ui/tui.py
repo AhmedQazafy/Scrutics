@@ -26,6 +26,7 @@ from textual.widgets import (
     Button, Input, Static
 )
 from textual import on
+from rich.text import Text
 
 from scrutics.db.inventory import AssetInventory
 from scrutics.capture.engine import CaptureEngine
@@ -84,6 +85,7 @@ Screen {
 
 #btn-pause {
     background: $warning-darken-2 !important;
+    margin-right: 2;
 }
 
 #btn-pause:focus {
@@ -93,6 +95,7 @@ Screen {
 #btn-quit {
     background: $error-darken-2 !important;
     dock: right;
+    margin-left: 2;
     margin-right: 1;
 }
 
@@ -520,14 +523,15 @@ class DropdownModal(ModalScreen):
     """
     BINDINGS = [
         Binding("escape", "dismiss", show=False),
-        Binding("up", "menu_up", show=False, priority=True),
-        Binding("down", "menu_down", show=False, priority=True),
-        Binding("1", "shortcut_start", show=False),
-        Binding("2", "shortcut_file_options", show=False),
+        Binding("up",     "menu_up",   show=False, priority=True),
+        Binding("down",   "menu_down", show=False, priority=True),
+        Binding("1", "shortcut_start",         show=False),
+        Binding("2", "shortcut_file_options",  show=False),
         Binding("3", "shortcut_toggle_panels", show=False),
-        Binding("p", "shortcut_pause", show=False),
-        Binding("q", "shortcut_quit", show=False),
-        Binding("tab", "ignore_focus_key", show=False, priority=True),
+        Binding("r", "shortcut_reload",        show=False),
+        Binding("p", "shortcut_pause",         show=False),
+        Binding("q", "shortcut_quit",          show=False),
+        Binding("tab",       "ignore_focus_key", show=False, priority=True),
         Binding("shift+tab", "ignore_focus_key", show=False, priority=True),
     ]
 
@@ -585,6 +589,9 @@ class DropdownModal(ModalScreen):
 
     def action_shortcut_toggle_panels(self):
         self.dismiss("__shortcut_toggle_panels")
+
+    def action_shortcut_reload(self):
+        self.dismiss("__shortcut_reload")
 
     def action_shortcut_pause(self):
         self.dismiss("__shortcut_pause")
@@ -771,6 +778,7 @@ class ScruticsApp(App):
         Binding("1",          "start_analysis",  "1:Start Analysis", show=False),
         Binding("2",          "file_options",    "2:File Options",   show=False),
         Binding("3",          "toggle_panels",   "3:Panels",         show=False),
+        Binding("r",          "reload_rules",    "R:Reload Rules",   show=False),
         Binding("p",          "pause_resume",    "P:Pause/Resume",   show=False),
         Binding("q",          "quit",            "Q:Quit",           show=False),
         Binding("left",       "previous_panel",  show=False),
@@ -795,6 +803,7 @@ class ScruticsApp(App):
         self._last_anomaly_count = 0
         self._active_panel = "assets"
         self._content_mode = False
+        self._status_style = "dim white"
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
@@ -806,6 +815,7 @@ class ScruticsApp(App):
             yield Button("Start Analysis =1", id="btn-start")
             yield Button("File Options =2",   id="btn-file-opts")
             yield Button("Toggle Panels =3",  id="btn-panels")
+            yield Button("Reload Rules =R",   id="btn-reload")
             yield Button("Pause =P",          id="btn-pause")
             yield Button("Quit =Q",           id="btn-quit")
 
@@ -838,6 +848,10 @@ class ScruticsApp(App):
         self._sync_panel_layout()
         self._focus_active_panel()
 
+        import scrutics.signals as signals
+        signals.set_reload_callback(lambda: self.call_from_thread(self.action_reload_rules))
+        signals.start_file_watch()
+
         # Auto-start from CLI env vars
         auto_live = os.environ.get("SCRUTICS_AUTO_LIVE")
         auto_file = os.environ.get("SCRUTICS_AUTO_FILE")
@@ -866,6 +880,9 @@ class ScruticsApp(App):
 
     @on(Button.Pressed, "#btn-panels")
     def btn_panels(self):    self.action_toggle_panels()
+
+    @on(Button.Pressed, "#btn-reload")
+    def btn_reload(self):    self.action_reload_rules()
 
     @on(Button.Pressed, "#btn-pause")
     def btn_pause(self):     self.action_pause_resume()
@@ -938,7 +955,30 @@ class ScruticsApp(App):
         btn = self.query_one("#btn-pause", Button)
         self._paused = not self._paused
         btn.label = "Resume =P" if self._paused else "Pause =P"
-        self.status_text = "Capture paused" if self._paused else "Capture resumed"
+        self._set_status("Capture paused" if self._paused else "Capture resumed")
+        self._focus_active_panel()
+
+    def action_reload_rules(self):
+        from scrutics.classifier.protocol import reload_rules
+        from scrutics.config.loader import load_sinks_config
+        from scrutics.integrations.sinks import SinkManager
+        try:
+            reload_rules()
+            new_sinks = load_sinks_config(strict=True)
+            if self.engine:
+                if self.engine.sink_manager:
+                    errors = self.engine.sink_manager.reload(new_sinks)
+                elif new_sinks:
+                    self.engine.sink_manager = SinkManager(new_sinks)
+                    errors = []
+                else:
+                    errors = []
+                if errors:
+                    raise ValueError("; ".join(errors))
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            self._set_status(f"✓ Rules reloaded at {ts}", "green")
+        except Exception as e:
+            self._set_status(f"Reload failed: {e}", "bold red")
         self._focus_active_panel()
 
     # ── Reactive ──────────────────────────────────────────────────────────────
@@ -1084,26 +1124,33 @@ class ScruticsApp(App):
 
     def _handle_dropdown_shortcut(self, result, current: str) -> bool:
         shortcut_actions = {
-            "__shortcut_start": ("start", self.action_start_analysis),
-            "__shortcut_file_options": ("file", self.action_file_options),
+            "__shortcut_start":         ("start",  self.action_start_analysis),
+            "__shortcut_file_options":  ("file",   self.action_file_options),
             "__shortcut_toggle_panels": ("panels", self.action_toggle_panels),
-            "__shortcut_pause": ("pause", self.action_pause_resume),
-            "__shortcut_quit": ("quit", self.action_quit),
+            "__shortcut_reload":        ("reload", self.action_reload_rules),
+            "__shortcut_pause":         ("pause",  self.action_pause_resume),
+            "__shortcut_quit":          ("quit",   self.action_quit),
         }
         if result not in shortcut_actions:
             return False
         target, action = shortcut_actions[result]
         if target == current:
             self._focus_active_panel()
-        elif target in {"pause", "quit"}:
+        elif target in {"pause", "quit", "reload"}:
             action()
         else:
             self.set_timer(0.01, action)
         return True
 
+    def _set_status(self, value: str, style: str = "dim white"):
+        self._status_style = style
+        self.status_text = value
+
     def watch_status_text(self, value: str):
         try:
-            self.query_one("#status-bar", Static).update(value)
+            self.query_one("#status-bar", Static).update(
+                Text(value, style=self._status_style)
+            )
         except Exception:
             pass
 
@@ -1118,7 +1165,7 @@ class ScruticsApp(App):
             self._start_session(baseline_window=config["baseline"])
             dur = config["duration"]
             dur_str = "infinite (stop with Q)" if dur == 0 else f"{dur}s"
-            self.status_text = (
+            self._set_status(
                 f"Capturing on {config['iface']}  |  "
                 f"duration: {dur_str}  |  baseline: {config['baseline']}s"
             )
@@ -1146,7 +1193,7 @@ class ScruticsApp(App):
                 self.notify(f"File not found: {filepath}", severity="error")
                 return
             self._start_session()
-            self.status_text = f"Analyzing: {os.path.basename(filepath)}"
+            self._set_status(f"Analyzing: {os.path.basename(filepath)}")
 
             def run():
                 try:
@@ -1163,7 +1210,7 @@ class ScruticsApp(App):
     def _on_capture_done(self):
         self._export_session()
         anomaly_count = len(self.engine.baseline.get_anomalies()) if self.engine else 0
-        self.status_text = (
+        self._set_status(
             f"Complete  |  {self.inventory.count()} assets  |  "
             f"{anomaly_count} anomalies  |  session: {self._session_dir}"
         )
@@ -1180,6 +1227,19 @@ class ScruticsApp(App):
 
         self.inventory = AssetInventory()
         self.engine = CaptureEngine(inventory=self.inventory, baseline_window=baseline_window)
+
+        from scrutics.db.writer import RollingWriter
+        self.engine.writer = RollingWriter(self._session_dir)
+
+        from scrutics.integrations.sinks import SinkManager
+        from scrutics.config.loader import load_sinks_config
+        try:
+            sinks_cfg = load_sinks_config(strict=True)
+            if sinks_cfg:
+                self.engine.sink_manager = SinkManager(sinks_cfg)
+        except Exception as e:
+            self._set_status(f"Sink config error: {e}", "bold red")
+
         self._last_anomaly_count = 0
         self._capture_start = None
         self._paused = False
@@ -1201,32 +1261,9 @@ class ScruticsApp(App):
             self.notify("No data to save", severity="warning")
 
     def _export_session(self):
-        if not self._session_dir or not self.inventory or not self.engine:
+        if not self._session_dir or not self.inventory:
             return
         self.inventory.export_csv(os.path.join(self._session_dir, "assets.csv"))
-        events = self.engine.get_event_buffer()
-        with open(os.path.join(self._session_dir, "events.csv"), "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["timestamp", "message"])
-            for ts, msg, _ in events:
-                writer.writerow([ts, msg])
-        anomalies = self.engine.baseline.get_anomalies()
-        if anomalies:
-            with open(os.path.join(self._session_dir, "anomalies.csv"), "w", newline="") as f:
-                writer = csv.DictWriter(
-                    f, fieldnames=["timestamp", "ip", "type", "severity", "detail"]
-                )
-                writer.writeheader()
-                for a in anomalies:
-                    writer.writerow({
-                        "timestamp": datetime.datetime.fromtimestamp(
-                            a.get("timestamp", 0)
-                        ).strftime("%Y-%m-%d %H:%M:%S"),
-                        "ip":       a.get("ip", ""),
-                        "type":     a.get("type", ""),
-                        "severity": a.get("severity", ""),
-                        "detail":   a.get("detail", ""),
-                    })
 
     # ── Display refresh ───────────────────────────────────────────────────────
 
@@ -1241,7 +1278,7 @@ class ScruticsApp(App):
         if self._capture_running.is_set():
             import time
             elapsed = _fmt_elapsed(time.time() - self._capture_start) if self._capture_start else "0s"
-            self.status_text = (
+            self._set_status(
                 f"Capturing  |  packets: {self.engine._packet_count}  |  "
                 f"assets: {self.inventory.count()}  |  "
                 f"anomalies: {len(self.engine.baseline.get_anomalies())}  |  "
@@ -1354,7 +1391,7 @@ class ScruticsApp(App):
                         f"{row.get('ip','')}  {row.get('type','')} -- {row.get('detail','')}"
                     )
 
-        self.status_text = (
+        self._set_status(
             f"Loaded: {os.path.basename(session)}  |  "
             f"full data in CSV files inside session folder"
         )

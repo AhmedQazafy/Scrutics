@@ -10,6 +10,9 @@ from scrutics.cli import build_parser, run_headless, should_use_tui
 
 
 def main():
+    import scrutics.signals as signals
+    signals.setup()
+
     if len(sys.argv) == 1:
         if not check_dependencies(headless=False):
             sys.exit(1)

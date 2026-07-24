@@ -1,7 +1,14 @@
-"""Protocol-based device classification with config rule support."""
+"""Protocol-based device classification.
 
-from scrutics.config.loader import load_rules, match_rule
+Rule precedence:  user rules → builtin YAML rules → hardcoded ICS_PORTS fallback.
+Hot-reload via reload_rules() — replaces both rule sets in-place, thread-safe via GIL.
+"""
 
+import threading
+
+from scrutics.config.loader import load_user_rules, load_builtin_rules, match_rule
+
+# ── Hardcoded fallback (used only if builtin_rules.yaml fails to load) ─────────
 ICS_PORTS = {
     502:   {"protocol": "Modbus TCP",      "role": "PLC / RTU / Modbus Gateway"},
     102:   {"protocol": "S7comm",          "role": "Siemens PLC"},
@@ -17,56 +24,131 @@ ICS_PORTS = {
     47808: {"protocol": "BACnet/IP",       "role": "Building Automation Device"},
 }
 IT_PORTS = {80, 443, 22, 23, 21, 25, 53, 110, 143, 3389, 5900}
+
 CONFIDENCE_HIGH   = "HIGH"
 CONFIDENCE_MEDIUM = "MEDIUM"
 CONFIDENCE_LOW    = "LOW"
-_USER_RULES = load_rules()
+
+# ── Live rule sets (replaced atomically on reload) ─────────────────────────────
+_RULE_LOCK = threading.RLock()
+_USER_RULES    = load_user_rules()
+_BUILTIN_RULES = load_builtin_rules()
 
 
 def reload_rules():
-    global _USER_RULES
-    _USER_RULES = load_rules()
+    """Hot-reload both rule sets from YAML. Raises ConfigError on bad config."""
+    global _USER_RULES, _BUILTIN_RULES
+    new_user_rules = load_user_rules(strict=True)
+    new_builtin_rules = load_builtin_rules(strict=True)
+    with _RULE_LOCK:
+        _USER_RULES = new_user_rules
+        _BUILTIN_RULES = new_builtin_rules
+    return {
+        "user_rules": len(new_user_rules),
+        "builtin_rules": len(new_builtin_rules),
+    }
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def known_service_ports() -> set[int]:
+    """Return ports that are meaningful listener/service signals."""
+    with _RULE_LOCK:
+        rules = list(_USER_RULES) + list(_BUILTIN_RULES)
+    ports = set(IT_PORTS) | set(ICS_PORTS)
+    for rule in rules:
+        port = rule.get("port")
+        if isinstance(port, int):
+            ports.add(port)
+    return ports
+
+
+_BEHAVIORAL_FIELDS = frozenset({
+    "never_initiates", "allowed_peers", "allowed_ports",
+    "alert_on_new_port", "max_new_peers_per_hour",
+})
+
+
+def _rule_to_result(rule: dict, source: str, confidence: str = None) -> dict:
+    result = {
+        "protocols":              [rule.get("classify_as", "Custom Protocol")],
+        "role":                   rule.get("role", "Custom Device"),
+        "is_ot":                  rule.get("is_ot", None),
+        "confidence":             confidence or rule.get("confidence", CONFIDENCE_HIGH),
+        "matched_rule":           source,
+        "behavioral_constraints": {k: rule[k] for k in _BEHAVIORAL_FIELDS if k in rule},
+    }
+    return result
 
 
 def classify_by_ports(ports_seen: set, mac: str = None) -> dict:
-    for port in ports_seen:
-        rule = match_rule(_USER_RULES, port=port, mac=mac)
-        if rule:
-            return {
-                "protocols": [rule.get("classify_as", "Custom Protocol")],
-                "role": rule.get("role", "Custom Device"),
-                "is_ot": rule.get("is_ot", None),
-                "confidence": rule.get("confidence", CONFIDENCE_HIGH),
-                "matched_rule": "user",
-            }
-    if mac:
-        rule = match_rule(_USER_RULES, mac=mac)
-        if rule:
-            return {
-                "protocols": [rule.get("classify_as", "Custom Protocol")],
-                "role": rule.get("role", "Custom Device"),
-                "is_ot": rule.get("is_ot", None),
-                "confidence": rule.get("confidence", CONFIDENCE_MEDIUM),
-                "matched_rule": "user",
-            }
-    matched_ics = [
-        {**ICS_PORTS[p], "port": p} for p in ports_seen if p in ICS_PORTS
-    ]
-    it_only = ports_seen.issubset(IT_PORTS) and not matched_ics
+    with _RULE_LOCK:
+        user_rules = list(_USER_RULES)
+        builtin_rules = list(_BUILTIN_RULES)
 
-    if matched_ics:
-        role = "SCADA Server / HMI (multi-protocol)" if len(matched_ics) > 1 else matched_ics[0]["role"]
+    # 1. User rules — single match, early return
+    for port in ports_seen:
+        rule = match_rule(user_rules, port=port, mac=mac)
+        if rule:
+            return _rule_to_result(rule, "user")
+    if mac:
+        rule = match_rule(user_rules, mac=mac)
+        if rule:
+            return _rule_to_result(rule, "user", confidence=CONFIDENCE_MEDIUM)
+
+    # 2. Builtin YAML rules — collect all matches for multi-protocol detection
+    if builtin_rules:
+        matched = [match_rule(builtin_rules, port=p) for p in ports_seen]
+        matched = [r for r in matched if r]
+        if matched:
+            if len(matched) > 1:
+                # Merge behavioral constraints across all matched rules
+                merged_constraints = {}
+                for r in matched:
+                    for k in _BEHAVIORAL_FIELDS:
+                        if k in r:
+                            merged_constraints[k] = r[k]
+                return {
+                    "protocols":              [r.get("classify_as", "Unknown") for r in matched],
+                    "role":                   "SCADA Server / HMI (multi-protocol)",
+                    "is_ot":                  True,
+                    "confidence":             CONFIDENCE_HIGH,
+                    "matched_rule":           "builtin",
+                    "behavioral_constraints": merged_constraints,
+                }
+            return _rule_to_result(matched[0], "builtin")
+
+    # 3. Hardcoded fallback (builtin YAML missing or empty)
+    else:
+        matched_ics = [{**ICS_PORTS[p], "port": p} for p in ports_seen if p in ICS_PORTS]
+        if matched_ics:
+            role = ("SCADA Server / HMI (multi-protocol)"
+                    if len(matched_ics) > 1 else matched_ics[0]["role"])
+            return {
+                "protocols":              [m["protocol"] for m in matched_ics],
+                "role":                   role,
+                "is_ot":                  True,
+                "confidence":             CONFIDENCE_HIGH,
+                "matched_rule":           "builtin",
+                "behavioral_constraints": {},
+            }
+
+    # 4. IT-only or unclassified
+    it_only = bool(ports_seen) and ports_seen.issubset(IT_PORTS)
+    if it_only:
         return {
-            "protocols": [m["protocol"] for m in matched_ics],
-            "role": role, "is_ot": True,
-            "confidence": CONFIDENCE_HIGH, "matched_rule": "builtin",
-        }
-    elif it_only:
-        return {
-            "protocols": ["IT (standard ports only)"], "role": "IT Device",
-            "is_ot": False, "confidence": CONFIDENCE_MEDIUM, "matched_rule": "builtin",
+            "protocols":              ["IT (standard ports only)"],
+            "role":                   "IT Device",
+            "is_ot":                  False,
+            "confidence":             CONFIDENCE_MEDIUM,
+            "matched_rule":           "builtin",
+            "behavioral_constraints": {},
         }
     return {
-        "protocols": ["Unknown"], "role": "Unclassified -- review manually",
-        "is_ot": None, "confidence": CONFIDENCE_LOW, "matched_rule": None,
+        "protocols":              ["Unknown"],
+        "role":                   "Unclassified -- review manually",
+        "is_ot":                  None,
+        "confidence":             CONFIDENCE_LOW,
+        "matched_rule":           None,
+        "behavioral_constraints": {},
     }

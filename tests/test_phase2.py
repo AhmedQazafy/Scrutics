@@ -12,7 +12,10 @@ import json
 import time
 import tempfile
 import pytest
+from scapy.all import Ether, IP, TCP
 
+from scrutics.capture.engine import CaptureEngine
+from scrutics.db.inventory import AssetInventory
 from scrutics.parsers.detector import detect_file_type
 from scrutics.parsers.zeek import extract_flows_from_zeek
 from scrutics.parsers.suricata import extract_flows_from_eve
@@ -199,6 +202,13 @@ class TestBaselineEngine:
         engine.observe("10.0.0.1", time.time(), True, set())
         assert "building" in engine.get_status("10.0.0.1")
 
+    def test_observation_window_uses_packet_timestamps(self):
+        engine = BaselineEngine(observation_window=10)
+        engine.observe("10.0.0.1", 1000.0, True, {"10.0.0.2"})
+        assert "building" in engine.get_status("10.0.0.1")
+        engine.observe("10.0.0.1", 1011.0, True, {"10.0.0.2"})
+        assert engine.get_status("10.0.0.1") == "active"
+
     def test_anomaly_new_peer_after_lock(self):
         engine = BaselineEngine(observation_window=0)  # instant lock
         ts = time.time()
@@ -211,6 +221,53 @@ class TestBaselineEngine:
         result = engine.observe("10.0.0.1", ts + 5, True, {"10.0.0.99"})
         assert result is not None
         assert result["type"] == "NEW_PEER"
+
+    def test_process_packet_uses_packet_timestamp(self):
+        engine = CaptureEngine(inventory=AssetInventory())
+        seen = {}
+        engine._process_flow_data = lambda **kwargs: seen.update(kwargs)
+        pkt = (
+            Ether(src="00:11:22:33:44:55", dst="66:77:88:99:aa:bb")
+            / IP(src="192.168.1.10", dst="192.168.1.20")
+            / TCP(dport=502)
+        )
+        pkt.time = 1234.5
+        engine._process_packet(pkt)
+        assert seen["ts"] == 1234.5
+
+    def test_raw_packet_does_not_credit_unknown_destination_port_as_listener(self):
+        inventory = AssetInventory()
+        engine = CaptureEngine(inventory=inventory)
+        pkt = (
+            Ether(src="00:11:22:33:44:55", dst="66:77:88:99:aa:bb")
+            / IP(src="192.168.1.10", dst="192.168.1.20")
+            / TCP(sport=40000, dport=55555)
+        )
+        engine._process_packet(pkt)
+        assert 55555 in inventory.get("192.168.1.10").contacted_ports
+        assert inventory.get("192.168.1.20") is None
+
+    def test_raw_packet_credits_known_destination_port_as_listener(self):
+        inventory = AssetInventory()
+        engine = CaptureEngine(inventory=inventory)
+        pkt = (
+            Ether(src="00:11:22:33:44:55", dst="66:77:88:99:aa:bb")
+            / IP(src="192.168.1.10", dst="192.168.1.20")
+            / TCP(sport=40000, dport=502)
+        )
+        engine._process_packet(pkt)
+        assert 502 in inventory.get("192.168.1.20").ports_seen
+
+    def test_raw_packet_credits_known_source_port_as_listener(self):
+        inventory = AssetInventory()
+        engine = CaptureEngine(inventory=inventory)
+        pkt = (
+            Ether(src="66:77:88:99:aa:bb", dst="00:11:22:33:44:55")
+            / IP(src="192.168.1.20", dst="192.168.1.10")
+            / TCP(sport=502, dport=40000)
+        )
+        engine._process_packet(pkt)
+        assert 502 in inventory.get("192.168.1.20").ports_seen
 
 
 # ── Confidence Scorer ─────────────────────────────────────────────────────────
